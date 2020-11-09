@@ -1,4 +1,4 @@
-import server
+import socket
 import threading
 import json
 import struct
@@ -12,62 +12,47 @@ import datetime
 # total : 13byte
 
 # data is always json-format
+import time
+import traceback
+
+TEST_PACKET = 0
+CLIENT_WELCOME = 1
+FULL_CONN = 2
+ECHO = 3
+ORDER_FETCH = 4
+RESULT_FETCH = 5
+HEARTBEAT = 6
+RESULT_SEND_FILE = 7
+SEND_FILE = 8
+START_FETCH = 9
+WAIT_FETCH = 10
+REQUEST_CLIENT_STATE = 11
+RESPONSE_CLIENT_STATE = 12
+ALREADY_FETCH_ORDER = 13
+TMP_CHAT = 14
 
 
-TEST_PACKET = 0x00
-CLIENT_WELCOME = 0x01
-FULL_CONN = 0x02
-ECHO = 0x03
-ORDER_FETCH = 0x04
-RESULT_FETCH = 0x05
-HEARTBEAT = 0x06
-RESULT_SEND_FILE = 0x07
-SEND_FILE = 0x08
-
-
-# INSTALL = 0x05
-# BYE = 0x06
-# REQUEST_CLIENTS_STATE = 0x07
-# RESPONSE_CLIENTS_STATE = 0x08
-# ADMIN_WELCOME = 0x09
-# HEARTBEAT = 0x0A
-
-"""
-import base64
-
-with open("img.jpeg", "rb") as image_file:
-    encoded_string = base64.b64encode(image_file.read())
-
-    decoded_string = base64.b64decode(encoded_string)
-    with open("test_img.jpeg", "w") as image_file2:
-        image_file2.write(decoded_string)
-로 보아 파일 이름 + 확장자가 필요하다        
-"""
-
-class Message:
-
+class Header:
     def __init__(self,
                  code: int,
                  sender: str,
                  receiver: str,
-                 size: int,
-                 data: bytes):
-        self.code = code
-        self.sender = sender
-        self.receiver = receiver
-        self.size = size
-        self.data = data
+                 size: int):
+        self.CODE = code
+        self.SENDER = sender
+        self.RECEIVER = receiver
+        self.SIZE = size
 
     @classmethod
     def decode(cls, byte_data):
-        header = struct.unpack('B4B4BL', byte_data[0:10])
+        header = struct.unpack('B4B4BL', byte_data[0:16])
 
         code = header[0]
-        sender = '.'.join(header[1:5])
-        receiver = '.'.join(header[5:9])
+        sender = '.'.join(list(map(str, header[1:5])))
+        receiver = '.'.join(list(map(str, header[5:9])))
         size = header[9]
 
-        return Message(code, sender, receiver, size, byte_data[10:10 + size])
+        return Header(code, sender, receiver, size)
 
     @classmethod
     def encode(cls, packet) -> bytes:
@@ -76,20 +61,35 @@ class Message:
         sender_ip_pieces = get_ip(packet.SENDER)
         receiver_ip_pieces = get_ip(packet.RECEIVER)
 
-        print(sender_ip_pieces)
-        print(receiver_ip_pieces)
-
         header = struct.pack('B4B4BL', packet.CODE, *sender_ip_pieces, *receiver_ip_pieces, packet.SIZE)
-        data = header
 
-        if packet.SIZE != 0:
-            data += packet.data
-
-        return data
+        return header
 
 
-HOST = '10.1.2.173'
-PORT = 14444
+class Message:
+
+    def __init__(self,
+                 header: Header,
+                 body: bytes):
+        self.HEADER = header
+        self.BODY = body
+
+
+def send_message(code: int,
+                 ip,
+                 conn,
+                 body=None):
+    header = Header(code, '10.1.2.171', ip, 0 if body is None else len(body))
+    data = Header.encode(header)
+
+    if body:
+        data += body
+
+    conn.sendall(data)
+
+
+HOST = '10.1.2.171'
+PORT = 14494
 
 
 class TestClient:
@@ -99,8 +99,12 @@ class TestClient:
         self.thread = None
         self.my_id = None
 
+        self.is_receiving = False
+        self.current_fetch = None
+        self.file = None
+
     def start(self):
-        client_socket = server.socket(server.AF_INET, server.SOCK_STREAM)
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((HOST, PORT))
 
         print('서버 연결 성공')
@@ -120,59 +124,73 @@ class TestClient:
             #     send_data = input(">>>").encode("utf-8")
             #     print()
             #     client_socket.send(Message.encode(
-            #         Message(ECHO, server.gethostbyname(server.getfqdn()), '10.1.2.171', len(send_data), send_data)))
+            #         Message(ECHO, socket.gethostbyname(socket.getfqdn()), '10.1.2.171', len(send_data), send_data)))
         except KeyboardInterrupt:
             self.close()
 
-        print('server is closed')
+        print('socket is closed')
 
     def receive(self):
-        while self.is_running:
-            data = self.client_socket.recv(1024)
+        try:
+            while self.is_running:
+                header_bytes = self.client_socket.recv(16)
 
-            print(data)
+                if not header_bytes:
+                    self.close()
+                    return
 
-            if not data:
-                self.close()
-                return
+                header = Header.decode(header_bytes)
+                body_bytes = self.client_socket.recv(header.SIZE)
 
-            message = Message.decode(data)
-            print("protocol received code is {} sender is {} receiver is {} size is {}".format(message.code,
-                                                                                              message.sender,
-                                                                                              message.receiver,
-                                                                                              message.size))
+                while len(body_bytes) != header.SIZE:
+                    body_bytes += self.client_socket.recv(header.SIZE - len(body_bytes))
 
-            if message.code == SEND_FILE:
-                json_data = json.loads(message.data)
-                print("fetch_id is {} checksum is {} ".format(json_data['fetch_id'], json_data['checksum']))
+                message = Message(header, body_bytes)
 
+                print("message received code is {} sender is {} receiver is {} size is {}".format(message.HEADER.CODE,
+                                                                                                  message.HEADER.SENDER,
+                                                                                                  message.HEADER.RECEIVER,
+                                                                                                  message.HEADER.SIZE))
 
-                file_name = json_data['file']['name']
-                file_binary = None
-                base64.decode(json_data['file']['binary'], file_binary)
+                if message.HEADER.CODE == ORDER_FETCH:
+                    json_data = json.loads(message.BODY)
+                    self.current_fetch = json_data
+                    self.is_receiving = True
 
-                with open('C:\\Users\\devbong\\Desktop\\test_path\\' + file_name + "-" + datetime.datetime.now(), 'wb') as file:
-                    file.write(file_binary)
+                    self.file = open('C:/Users/devbong/Desktop/test_path/{}.{}'.format(json_data['file']['name'] + '-2',
+                                                                                       json_data['file']['ext']), 'wb')
 
+                elif message.HEADER.CODE == SEND_FILE:
 
-                print('패치 파일을 받았습니다 전송할 결과를 선택하여 주세요')
-                choice_number = int(input(">>>"))
+                    json_data = json.loads(message.BODY.decode('utf-8'))
+                    file_binary = base64.b64decode(json_data['binary'])
 
-                send_data = {
-                    "end_date": datetime.datetime.now(),
-                    "is_complete": True if choice_number == 0 else False
-                    # 해당 코드에는 없지만 실제 클라이언트 엔진에서 패치 후 checksum 값과 비교하여 똑같으면 True로 결정
-                }
+                    self.file.write(file_binary)
 
-                self.client_socket.sendall(Message.encode(
-                    Message(RESULT_FETCH, server.gethostbyname(server.getfqdn()), '10.1.2.171', len(send_data),
-                            send_data)
-                ))
+                    if json_data.get('is_final', False):
+                        print('패치 파일을 받았습니다 전송할 결과를 선택하여 주세요')
+                        print('성공 : 0, 실패 : 1')
+                        choice_number = int(input(">>>"))
+
+                        send_data = {
+                            "fetch_no": self.current_fetch['fetch_no'],
+                            "end_date": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            "is_complete": True if choice_number == 0 else False
+                            # 해당 코드에는 없지만 실제 클라이언트 엔진에서 패치 후 checksum 값과 비교하여 똑같으면 True로 결정
+                        }
+
+                        self.file.close()
+                        send_message(RESULT_FETCH, '10.1.2.171', self.client_socket,
+                                     json.dumps(send_data).encode('utf-8'))
+        except Exception as e:
+            print(e)
+            traceback.print_exc()
+
 
     def close(self):
         self.is_running = False
         self.client_socket.close()
-        print('server is closed')
+        print('socket is closed')
         exit(0)
 
 

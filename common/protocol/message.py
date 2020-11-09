@@ -1,4 +1,6 @@
 import struct
+import json
+import socket
 
 # code - 1byte
 # sender - 4byte
@@ -8,49 +10,85 @@ import struct
 
 # data is always json-format
 
-TEST_PACKET = 0x00
-CLIENT_WELCOME = 0x01
-FULL_CONN = 0x02
-ECHO = 0x03
-ORDER_FETCH = 0x04
-RESULT_FETCH = 0x05
-HEARTBEAT = 0x06
-RESULT_SEND_FILE = 0x07
-SEND_FILE = 0x08
+TEST_PACKET = 0
+CLIENT_WELCOME = 1
+FULL_CONN = 2
+ECHO = 3
+ORDER_FETCH = 4
+RESULT_FETCH = 5
+HEARTBEAT = 6
+RESULT_SEND_FILE = 7
+SEND_FILE = 8
+RESULT_PREPARE_FETCH = 9
+WAIT_FETCH = 10
+REQUEST_CLIENT_STATE = 11
+RESPONSE_CLIENT_STATE = 12
+ALREADY_FETCH_ORDER = 13
+TMP_CHAT = 14
+
+
 
 
 class Header:
     def __init__(self,
+                 size: int,
                  code: int,
-                 sender: str,
-                 receiver: str,
-                 size: int):
+                 sender: str, # todo: 4바이트의 정수값 사용하기 0x00|00|00|00(고민중)
+                 receiver: str):
+        self.SIZE = size
         self.CODE = code
         self.SENDER = sender
         self.RECEIVER = receiver
-        self.SIZE = size
 
     @classmethod
-    def decode(cls, byte_data):
-        header = struct.unpack('B4B4BL', byte_data[0:16])
+    def decode(cls, byte_data: bytes):
+        """
+        bytes(len=13) -> Header 변환 함수
 
-        code = header[0]
-        sender = '.'.join(list(map(str, header[1:5])))
-        receiver = '.'.join(list(map(str, header[5:9])))
-        size = header[9]
+        :param byte_data: bytes(len=13 고정)
 
-        return Header(code, sender, receiver, size)
+        size - 4byte
+        code - 1byte
+        sender - 1byte * 4 = 4byte
+        receiver - 1byte * 4 = 4byte
 
-    @classmethod
-    def encode(cls, packet) -> bytes:
-        get_ip = lambda ip: [int(piece) for piece in ip.split('.')]
+        :return:
+        """
+        header = None
+        try:
+            unpack_header = struct.unpack('LB4B4B', byte_data)
+            """
+            L(size: unsigned long) = 4byte
+            B(code: unsigned char) = 1byte     
+            4B(sender: unsigned char * 4) 정수 값이 0 ~ 256 므로 = 4byte
+            4B(receiver: unsigned char * 4) 정수 값이 0 ~ 256 므로 = 4byte       
+            """
 
-        sender_ip_pieces = get_ip(packet.SENDER)
-        receiver_ip_pieces = get_ip(packet.RECEIVER)
 
-        header = struct.pack('B4B4BL', packet.CODE, *sender_ip_pieces, *receiver_ip_pieces, packet.SIZE)
+            size = unpack_header[0]
+            code = unpack_header[1]
+            sender = socket.inet_ntoa(byte_data[5:9])
+            receiver = socket.inet_ntoa(byte_data[9:13])
+
+
+
+            header = Header(size, code, sender, receiver)
+
+        except Exception as e:
+            print(e)
 
         return header
+
+    @classmethod
+    def encode(cls, header) -> bytes:
+        """
+        Header -> bytes 변환 함수
+        
+        :param header: 
+        :return:
+        """
+        return struct.pack('LB4B4B', header.SIZE, header.CODE, *socket.inet_aton(header.SENDER),
+                           *socket.inet_aton(header.RECEIVER))
 
 
 class Message:
@@ -60,3 +98,7 @@ class Message:
                  body: bytes):
         self.HEADER = header
         self.BODY = body
+
+    @property
+    def json_body(self):
+        return json.loads(self.BODY.decode('utf-8'))
